@@ -1,158 +1,231 @@
 import HeroImage from "../models/HeroImage.js";
-import { uploadImage, deleteImage, getPublicIdFromUrl } from "../config/cloudinary.js";
+import fs from "fs";
+import cloudinary from "../config/cloudinary.js";
 
-// Get all hero images sorted by sequence
+// ======================================================================
+// HELPERS
+// ======================================================================
+
+// Safely delete local file
+const safeUnlink = (path) => {
+  try {
+    if (path && fs.existsSync(path)) fs.unlinkSync(path);
+  } catch {}
+};
+
+// Extract Cloudinary Public ID
+// https://res.cloudinary.com/.../upload/v123/folder/abc.jpg
+//   → folder/abc
+const extractPublicId = (url) => {
+  if (!url) return null;
+
+  const noParams = url.split("?")[0];
+  const afterUpload = noParams.split("/upload/")[1];
+  if (!afterUpload) return null;
+
+  const parts = afterUpload.split("/");
+
+  // Remove version (v1234)
+  if (parts[0].startsWith("v")) parts.shift();
+
+  const filePath = parts.join("/");
+  return filePath.replace(/\.[^/.]+$/, "");
+};
+
+// UPLOAD IMAGE WRAPPER
+const uploadImage = async (filePath, folder) => {
+  const result = await cloudinary.uploader.upload(filePath, { folder });
+  return result.secure_url;
+};
+
+// DELETE IMAGE FROM CLOUDINARY
+const deleteImage = async (publicId) => {
+  if (!publicId) return;
+  try {
+    await cloudinary.uploader.destroy(publicId);
+  } catch (err) {
+    console.log("⚠️ Cloudinary delete error:", err.message);
+  }
+};
+
+// ======================================================================
+// GET ALL HERO IMAGES
+// ======================================================================
 export const getHeroImages = async (req, res) => {
   try {
     const heroImages = await HeroImage.find().sort({ sequence: 1 });
     res.status(200).json(heroImages);
   } catch (error) {
-    res.status(500).json({ 
-      message: "Error fetching hero images", 
-      error: error.message 
+    res.status(500).json({
+      message: "Error fetching hero images",
+      error: error.message,
     });
   }
 };
 
-// Upload new hero image
+// ======================================================================
+// UPLOAD NEW HERO IMAGE
+// ======================================================================
 export const uploadHeroImages = async (req, res) => {
   try {
     const { link, sequence } = req.body;
-    
-    // Upload desktop image (required)
-    const desktopResult = await uploadImage(req.files.desktopImage[0].path);
-    const desktopImageUrl = desktopResult.secure_url;
-    const desktopPublicId = desktopResult.public_id;
 
-    // Upload mobile image if provided
-    let mobileImageUrl = null;
-    let mobilePublicId = null;
-    if (req.files.mobileImage && req.files.mobileImage.length > 0) {
-      const mobileResult = await uploadImage(req.files.mobileImage[0].path);
-      mobileImageUrl = mobileResult.secure_url;
-      mobilePublicId = mobileResult.public_id;
+    if (!req.files?.desktopImage?.length) {
+      return res.status(400).json({ message: "Desktop image is required" });
     }
 
-    // Create new hero image
-    const newHeroImage = new HeroImage({
-      desktopImageUrl,
-      mobileImageUrl,
+    const desktopFile = req.files.desktopImage[0];
+    const mobileFile = req.files.mobileImage?.[0];
+
+    // Upload desktop image
+    const desktopURL = await uploadImage(desktopFile.path, "hero_images");
+    safeUnlink(desktopFile.path);
+
+    let mobileURL = null;
+    if (mobileFile) {
+      mobileURL = await uploadImage(mobileFile.path, "hero_images");
+      safeUnlink(mobileFile.path);
+    }
+
+    const heroImage = await HeroImage.create({
+      desktopImageUrl: desktopURL,
+      mobileImageUrl: mobileURL,
       link,
-      sequence: sequence ? parseInt(sequence) : 0
+      sequence: sequence ? parseInt(sequence) : 0,
     });
 
-    const savedHeroImage = await newHeroImage.save();
-    res.status(201).json(savedHeroImage);
+    res.status(201).json(heroImage);
   } catch (error) {
-    res.status(500).json({ 
-      message: "Error uploading hero image", 
-      error: error.message 
+    res.status(500).json({
+      message: "Error uploading hero image",
+      error: error.message,
     });
   }
 };
 
-// Update hero image
+// ======================================================================
+// UPDATE HERO IMAGE
+// ======================================================================
 export const updateHeroImage = async (req, res) => {
   try {
     const { id } = req.params;
     const { link, sequence } = req.body;
-    
+
     const heroImage = await HeroImage.findById(id);
     if (!heroImage) {
       return res.status(404).json({ message: "Hero image not found" });
     }
 
-    // Update desktop image if provided
-    if (req.files.desktopImage && req.files.desktopImage.length > 0) {
-      // Delete old image
-      const desktopPublicId = getPublicIdFromUrl(heroImage.desktopImageUrl);
-      await deleteImage(desktopPublicId);
-      
-      // Upload new image
-      const desktopResult = await uploadImage(req.files.desktopImage[0].path);
-      heroImage.desktopImageUrl = desktopResult.secure_url;
+    // ----------------------------
+    // UPDATE DESKTOP IMAGE (if new)
+    // ----------------------------
+    if (req.files?.desktopImage?.length > 0) {
+      const file = req.files.desktopImage[0];
+
+      // Delete old desktop img
+      const oldPublicId = extractPublicId(heroImage.desktopImageUrl);
+      await deleteImage(oldPublicId);
+
+      // Upload new
+      const newURL = await uploadImage(file.path, "hero_images");
+      heroImage.desktopImageUrl = newURL;
+
+      safeUnlink(file.path);
     }
 
-    // Update mobile image if provided
-    if (req.files.mobileImage && req.files.mobileImage.length > 0) {
-      // Delete old mobile image if exists
+    // ----------------------------
+    // UPDATE MOBILE IMAGE (if new)
+    // ----------------------------
+    if (req.files?.mobileImage?.length > 0) {
+      const file = req.files.mobileImage[0];
+
+      // Delete old mobile img
       if (heroImage.mobileImageUrl) {
-        const mobilePublicId = getPublicIdFromUrl(heroImage.mobileImageUrl);
-        await deleteImage(mobilePublicId);
+        const oldPublicId = extractPublicId(heroImage.mobileImageUrl);
+        await deleteImage(oldPublicId);
       }
-      
-      // Upload new mobile image
-      const mobileResult = await uploadImage(req.files.mobileImage[0].path);
-      heroImage.mobileImageUrl = mobileResult.secure_url;
+
+      // Upload new
+      const newURL = await uploadImage(file.path, "hero_images");
+      heroImage.mobileImageUrl = newURL;
+
+      safeUnlink(file.path);
     }
 
-    // Update other fields
-    if (link) heroImage.link = link;
+    // Update text fields
+    if (link !== undefined) heroImage.link = link;
     if (sequence !== undefined) heroImage.sequence = parseInt(sequence);
 
-    const updatedHeroImage = await heroImage.save();
-    res.status(200).json(updatedHeroImage);
+    const updated = await heroImage.save();
+    res.status(200).json(updated);
   } catch (error) {
-    res.status(500).json({ 
-      message: "Error updating hero image", 
-      error: error.message 
+    res.status(500).json({
+      message: "Error updating hero image",
+      error: error.message,
     });
   }
 };
 
-// Delete hero image
+// ======================================================================
+// DELETE HERO IMAGE
+// ======================================================================
 export const deleteHeroImage = async (req, res) => {
   try {
-    const { id } = req.params;
-    const heroImage = await HeroImage.findById(id);
-    
+    const heroImage = await HeroImage.findById(req.params.id);
+
     if (!heroImage) {
       return res.status(404).json({ message: "Hero image not found" });
     }
 
-    // Delete images from cloud storage
-    const desktopPublicId = getPublicIdFromUrl(heroImage.desktopImageUrl);
-    await deleteImage(desktopPublicId);
-    
-    if (heroImage.mobileImageUrl) {
-      const mobilePublicId = getPublicIdFromUrl(heroImage.mobileImageUrl);
-      await deleteImage(mobilePublicId);
+    // Delete desktop
+    if (heroImage.desktopImageUrl) {
+      const publicId = extractPublicId(heroImage.desktopImageUrl);
+      await deleteImage(publicId);
     }
 
-    await HeroImage.findByIdAndDelete(id);
+    // Delete mobile
+    if (heroImage.mobileImageUrl) {
+      const publicId = extractPublicId(heroImage.mobileImageUrl);
+      await deleteImage(publicId);
+    }
+
+    await heroImage.deleteOne();
+
     res.status(200).json({ message: "Hero image deleted successfully" });
   } catch (error) {
-    res.status(500).json({ 
-      message: "Error deleting hero image", 
-      error: error.message 
+    res.status(500).json({
+      message: "Error deleting hero image",
+      error: error.message,
     });
   }
 };
 
-// Reorder hero images
+// ======================================================================
+// REORDER HERO IMAGES
+// ======================================================================
 export const reorderHeroImages = async (req, res) => {
   try {
-    const { updates } = req.body; // Array of { id, sequence }
+    const { updates } = req.body;
 
-    if (!updates || !Array.isArray(updates)) {
+    if (!Array.isArray(updates)) {
       return res.status(400).json({ message: "Invalid updates format" });
     }
 
-    // Update each hero image sequence
-    const updatePromises = updates.map(update => 
-      HeroImage.findByIdAndUpdate(
-        update.id, 
-        { sequence: update.sequence },
-        { new: true, runValidators: true }
+    const results = await Promise.all(
+      updates.map(({ id, sequence }) =>
+        HeroImage.findByIdAndUpdate(
+          id,
+          { sequence },
+          { new: true, runValidators: true }
+        )
       )
     );
 
-    const updatedImages = await Promise.all(updatePromises);
-    res.status(200).json(updatedImages);
+    res.status(200).json(results);
   } catch (error) {
-    res.status(500).json({ 
-      message: "Error reordering hero images", 
-      error: error.message 
+    res.status(500).json({
+      message: "Error reordering hero images",
+      error: error.message,
     });
   }
 };
