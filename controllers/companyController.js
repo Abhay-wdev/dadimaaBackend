@@ -1,43 +1,15 @@
 import Company from "../models/companyModal.js";
 import cloudinary from "../config/cloudinary.js";
 import fs from "fs";
+import {
+  deleteCloudinaryImage,
+} from "../config/cloudinaryHelper.js";
 
-// ======================================================================
-// SAFE HELPERS
-// ======================================================================
-const safeUnlink = (path) => {
-  try {
-    if (path && fs.existsSync(path)) fs.unlinkSync(path);
-  } catch {}
-};
-
-// Extract Public ID from Cloudinary URL
-// https://res.cloudinary.com/.../upload/v123/company_logos/abc.jpg
-// ➝ company_logos/abc
-const extractPublicId = (url) => {
-  if (!url) return null;
-
-  const noParams = url.split("?")[0];
-  const afterUpload = noParams.split("/upload/")[1];
-  if (!afterUpload) return null;
-
-  const parts = afterUpload.split("/");
-
-  // Remove version (v123...)
-  if (parts[0].startsWith("v")) parts.shift();
-
-  const filePath = parts.join("/");
-  return filePath.replace(/\.[^/.]+$/, "");
-};
-
-// ======================================================================
-// CREATE OR UPDATE COMPANY
-// ======================================================================
 export const createOrUpdateCompany = async (req, res) => {
   try {
     let data = { ...req.body };
 
-    // ---------- JSON parsing ----------
+    // Parse JSON fields
     const parseIfJSON = (v) => {
       try {
         return typeof v === "string" ? JSON.parse(v) : v;
@@ -45,11 +17,50 @@ export const createOrUpdateCompany = async (req, res) => {
         return v;
       }
     };
+
     data.address = parseIfJSON(data.address);
     data.directors = parseIfJSON(data.directors);
     data.socialLinks = parseIfJSON(data.socialLinks);
+    
+    // Handle deliveryCharge field
+    if (data.deliveryCharge !== undefined) {
+      // Convert to number if it's a string
+      if (typeof data.deliveryCharge === 'string') {
+        data.deliveryCharge = parseFloat(data.deliveryCharge);
+      }
+      
+      // Validate it's a number and non-negative
+      if (isNaN(data.deliveryCharge) || data.deliveryCharge < 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Delivery charge must be a non-negative number",
+        });
+      }
+    } else {
+      // Set default value if not provided
+      data.deliveryCharge = 0;
+    }
+    
+    // Handle freeDeliveryUpto field
+    if (data.freeDeliveryUpto !== undefined) {
+      // Convert to number if it's a string
+      if (typeof data.freeDeliveryUpto === 'string') {
+        data.freeDeliveryUpto = parseFloat(data.freeDeliveryUpto);
+      }
+      
+      // Validate it's a number and non-negative
+      if (isNaN(data.freeDeliveryUpto) || data.freeDeliveryUpto < 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Free delivery threshold must be a non-negative number",
+        });
+      }
+    } else {
+      // Set default value if not provided
+      data.freeDeliveryUpto = 0;
+    }
 
-    // ---------- Validation ----------
+    // Email validation
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (data.email && !emailRegex.test(data.email)) {
       return res.status(400).json({
@@ -58,47 +69,44 @@ export const createOrUpdateCompany = async (req, res) => {
       });
     }
 
+    // Load existing company for reference (for image delete)
     let existingCompany = await Company.findOne();
 
+    // Clone social links to modify safely
     const updatedSocialLinks = [...(data.socialLinks || [])];
 
-    // ==================================================================
-    // FILE UPLOAD HANDLING (Logo + dynamic social icons)
-    // ==================================================================
+    // ==========================================================
+    // 🔥 HANDLE FILE UPLOADS + AUTO DELETE OLD CLOUDINARY IMAGES
+    // ==========================================================
     if (req.files && req.files.length > 0) {
       for (const file of req.files) {
         try {
-          // -------------------------------------------------------------
-          // 1️⃣ COMPANY LOGO
-          // -------------------------------------------------------------
+          // ----------------------------------------------------
+          // 1️⃣ Company Logo Update (Replace old logo)
+          // ----------------------------------------------------
           if (file.fieldname === "logo") {
-            // Delete old logo
             if (existingCompany?.logo) {
-              const publicId = extractPublicId(existingCompany.logo);
-              if (publicId) await cloudinary.uploader.destroy(publicId);
+              await deleteCloudinaryImage(existingCompany.logo);
             }
 
-            // Upload new logo
-            const result = await cloudinary.uploader.upload(file.path, {
+            const upload = await cloudinary.uploader.upload(file.path, {
               folder: "company_logos",
             });
 
-            data.logo = result.secure_url;
+            data.logo = upload.secure_url;
           }
 
-          // -------------------------------------------------------------
-          // 2️⃣ SOCIAL ICONS (dynamic index: socialIcon_0, socialIcon_1...)
-          // -------------------------------------------------------------
+          // ----------------------------------------------------
+          // 2️⃣ Social Icons dynamic replacement: socialIcon_0, socialIcon_1 ...
+          // ----------------------------------------------------
           else if (file.fieldname.startsWith("socialIcon_")) {
             const index = parseInt(file.fieldname.split("_")[1]);
 
             if (!isNaN(index)) {
-              // Delete old icon if exists
-              if (existingCompany?.socialLinks?.[index]?.logoimage) {
-                const publicId = extractPublicId(
-                  existingCompany.socialLinks[index].logoimage
-                );
-                if (publicId) await cloudinary.uploader.destroy(publicId);
+              const oldIcon = existingCompany?.socialLinks?.[index]?.logoimage;
+
+              if (oldIcon) {
+                await deleteCloudinaryImage(oldIcon);
               }
 
               const upload = await cloudinary.uploader.upload(file.path, {
@@ -110,19 +118,24 @@ export const createOrUpdateCompany = async (req, res) => {
             }
           }
 
-          safeUnlink(file.path);
+          // Delete temporary upload file
+          if (fs.existsSync(file.path)) fs.unlinkSync(file.path);
+
         } catch (err) {
-          console.log("❌ Upload Error:", err);
-          safeUnlink(file.path);
+          console.error("❌ Upload error:", err);
+
+          if (file.path && fs.existsSync(file.path)) {
+            fs.unlinkSync(file.path);
+          }
         }
       }
     }
 
     data.socialLinks = updatedSocialLinks;
 
-    // ==================================================================
+    // ==========================================================
     // REQUIRED FIELD VALIDATION
-    // ==================================================================
+    // ==========================================================
     const requiredFields = [
       "name",
       "email",
@@ -147,21 +160,21 @@ export const createOrUpdateCompany = async (req, res) => {
       }
     }
 
-    // Filter directors
-    if (data.directors?.length) {
+    // Directors validation
+    if (data.directors && Array.isArray(data.directors)) {
       data.directors = data.directors.filter((d) => d.name?.trim());
     }
 
-    // Filter social links
-    if (data.socialLinks?.length) {
+    // Social links validation
+    if (data.socialLinks && Array.isArray(data.socialLinks)) {
       data.socialLinks = data.socialLinks.filter(
         (s) => s.social || s.link || s.logoimage
       );
     }
 
-    // ==================================================================
-    // CREATE OR UPDATE SINGLE COMPANY
-    // ==================================================================
+    // ==========================================================
+    // CREATE OR UPDATE COMPANY IN DB
+    // ==========================================================
     let company = await Company.findOne();
 
     if (company) {
@@ -187,11 +200,17 @@ export const createOrUpdateCompany = async (req, res) => {
       message: "Company created successfully",
       company: newCompany,
     });
+
   } catch (error) {
     console.error("❌ Company create/update error:", error);
 
+    // Cleanup temp files on error
     if (req.files) {
-      req.files.forEach((f) => safeUnlink(f.path));
+      req.files.forEach((file) => {
+        if (file.path && fs.existsSync(file.path)) {
+          fs.unlinkSync(file.path);
+        }
+      });
     }
 
     res.status(500).json({
@@ -202,14 +221,15 @@ export const createOrUpdateCompany = async (req, res) => {
   }
 };
 
-// ======================================================================
-// GET LIST
-// ======================================================================
+// ==================================================
+// GET ALL COMPANIES
+// ==================================================
 export const getCompanies = async (req, res) => {
   try {
     const companies = await Company.find().sort({ createdAt: -1 });
     res.status(200).json({ success: true, companies });
   } catch (error) {
+    console.error("❌ Fetch companies error:", error);
     res.status(500).json({
       success: false,
       message: "Failed to fetch companies",
@@ -218,17 +238,22 @@ export const getCompanies = async (req, res) => {
   }
 };
 
-// ======================================================================
-// GET ONE
-// ======================================================================
+// ==================================================
+// GET SINGLE COMPANY
+// ==================================================
 export const getCompany = async (req, res) => {
   try {
     const company = await Company.findById(req.params.id);
-    if (!company)
-      return res.status(404).json({ success: false, message: "Company not found" });
+    if (!company) {
+      return res.status(404).json({
+        success: false,
+        message: "Company not found",
+      });
+    }
 
     res.status(200).json({ success: true, company });
   } catch (error) {
+    console.error("❌ Fetch company error:", error);
     res.status(500).json({
       success: false,
       message: "Failed to fetch company",
@@ -237,30 +262,37 @@ export const getCompany = async (req, res) => {
   }
 };
 
-// ======================================================================
-// DELETE COMPANY + DELETE IMAGES FROM CLOUDINARY
-// ======================================================================
+// ==================================================
+// DELETE COMPANY
+// ==================================================
 export const deleteCompany = async (req, res) => {
   try {
     const company = await Company.findById(req.params.id);
-    if (!company)
-      return res.status(404).json({ success: false, message: "Company not found" });
+    if (!company) {
+      return res.status(404).json({ 
+        success: false, 
+        message: "Company not found" 
+      });
+    }
 
-    // Delete logo
+    // ✅ Optional: Delete associated images from Cloudinary
     if (company.logo) {
-      const publicId = extractPublicId(company.logo);
-      if (publicId) {
+      try {
+        const publicId = company.logo.split('/').slice(-2).join('/').split('.')[0];
         await cloudinary.uploader.destroy(publicId);
+      } catch (err) {
+        console.error("Error deleting logo:", err);
       }
     }
 
-    // Delete social icon images
-    if (company.socialLinks?.length) {
-      for (const s of company.socialLinks) {
-        if (s.logoimage) {
-          const publicId = extractPublicId(s.logoimage);
-          if (publicId) {
+    if (company.socialLinks && company.socialLinks.length > 0) {
+      for (const link of company.socialLinks) {
+        if (link.logoimage) {
+          try {
+            const publicId = link.logoimage.split('/').slice(-2).join('/').split('.')[0];
             await cloudinary.uploader.destroy(publicId);
+          } catch (err) {
+            console.error("Error deleting social icon:", err);
           }
         }
       }
@@ -268,14 +300,127 @@ export const deleteCompany = async (req, res) => {
 
     await company.deleteOne();
 
-    res.json({
+    res.status(200).json({
       success: true,
       message: "Company deleted successfully",
     });
   } catch (error) {
+    console.error("❌ Delete company error:", error);
     res.status(500).json({
       success: false,
       message: "Failed to delete company",
+      error: error.message,
+    });
+  }
+};
+
+// ==================================================
+// UPDATE DELIVERY CHARGE
+// ==================================================
+export const updateDeliveryCharge = async (req, res) => {
+  try {
+    const { deliveryCharge } = req.body;
+    
+    // Validate delivery charge
+    if (deliveryCharge === undefined) {
+      return res.status(400).json({
+        success: false,
+        message: "Delivery charge is required",
+      });
+    }
+    
+    // Convert to number if it's a string
+    let charge = deliveryCharge;
+    if (typeof charge === 'string') {
+      charge = parseFloat(charge);
+    }
+    
+    // Validate it's a number and non-negative
+    if (isNaN(charge) || charge < 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Delivery charge must be a non-negative number",
+      });
+    }
+    
+    // Find and update company
+    const company = await Company.findOne();
+    if (!company) {
+      return res.status(404).json({
+        success: false,
+        message: "Company not found",
+      });
+    }
+    
+    company.deliveryCharge = charge;
+    await company.save();
+    
+    res.status(200).json({
+      success: true,
+      message: "Delivery charge updated successfully",
+      deliveryCharge: company.deliveryCharge,
+    });
+  } catch (error) {
+    console.error("❌ Update delivery charge error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to update delivery charge",
+      error: error.message,
+    });
+  }
+};
+
+// ==================================================
+// UPDATE FREE DELIVERY THRESHOLD
+// ==================================================
+export const updateFreeDeliveryThreshold = async (req, res) => {
+  try {
+    const { freeDeliveryUpto } = req.body;
+    
+    // Validate free delivery threshold
+    if (freeDeliveryUpto === undefined) {
+      return res.status(400).json({
+        success: false,
+        message: "Free delivery threshold is required",
+      });
+    }
+    
+    // Convert to number if it's a string
+    let threshold = freeDeliveryUpto;
+    if (typeof threshold === 'string') {
+      threshold = parseFloat(threshold);
+    }
+    
+    // Validate it's a number and non-negative
+    if (isNaN(threshold) || threshold < 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Free delivery threshold must be a non-negative number",
+      });
+    }
+    
+    // Find and update company
+    const company = await Company.findOne();
+    if (!company) {
+      return res.status(404).json({
+        success: false,
+        message: "Company not found",
+      });
+    }
+    
+    company.freeDeliveryUpto = threshold;
+    await company.save();
+    
+    res.status(200).json({
+      success: true,
+      message: "Free delivery threshold updated successfully",
+      freeDeliveryUpto: company.freeDeliveryUpto,
+    });
+  } catch (error) {
+    console.error("❌ Update free delivery threshold error:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to update free delivery threshold",
       error: error.message,
     });
   }

@@ -122,6 +122,30 @@ const companySchema = new mongoose.Schema(
       default: "Thank you for your business!",
       trim: true,
     },
+    deliveryCharge: {
+      type: Number,
+      required: [true, "Delivery charge is required"],
+      min: [0, "Delivery charge cannot be negative"],
+      default: 0,
+      validate: {
+        validator: function(value) {
+          return Number.isFinite(value);
+        },
+        message: "Delivery charge must be a valid number"
+      }
+    },
+    freeDeliveryUpto: {
+      type: Number,
+      required: [true, "Free delivery threshold is required"],
+      min: [0, "Free delivery threshold cannot be negative"],
+      default: 0,
+      validate: {
+        validator: function(value) {
+          return Number.isFinite(value);
+        },
+        message: "Free delivery threshold must be a valid number"
+      }
+    },
     createdBy: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
@@ -150,6 +174,38 @@ companySchema.pre('save', function(next) {
     this.socialLinks = this.socialLinks.filter(
       link => link.social || link.link || link.logoimage
     );
+  }
+  
+  // Ensure deliveryCharge is a valid number
+  if (this.deliveryCharge !== undefined) {
+    // Convert to number if it's a string
+    if (typeof this.deliveryCharge === 'string') {
+      this.deliveryCharge = parseFloat(this.deliveryCharge);
+    }
+    
+    // If it's NaN or negative, set to default
+    if (isNaN(this.deliveryCharge) || this.deliveryCharge < 0) {
+      this.deliveryCharge = 0;
+    }
+  } else {
+    // Set default if not provided
+    this.deliveryCharge = 0;
+  }
+  
+  // Ensure freeDeliveryUpto is a valid number
+  if (this.freeDeliveryUpto !== undefined) {
+    // Convert to number if it's a string
+    if (typeof this.freeDeliveryUpto === 'string') {
+      this.freeDeliveryUpto = parseFloat(this.freeDeliveryUpto);
+    }
+    
+    // If it's NaN or negative, set to default
+    if (isNaN(this.freeDeliveryUpto) || this.freeDeliveryUpto < 0) {
+      this.freeDeliveryUpto = 0;
+    }
+  } else {
+    // Set default if not provided
+    this.freeDeliveryUpto = 0;
   }
   
   next();

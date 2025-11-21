@@ -7,7 +7,12 @@ const userSchema = new mongoose.Schema(
     image: { type: String },
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
     password: { type: String, required: true },
-    phone: { type: Number },
+    phone: {
+  type: String,
+  required: true,
+  match: [/^[0-9]{10}$/, "Please enter a valid 10-digit phone number"],
+  trim: true,
+},
     role: {
       type: String,
       enum: ["customer", "admin", "seller", "manager"],
