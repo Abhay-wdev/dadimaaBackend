@@ -30,7 +30,7 @@ export const sendRegistrationOTP = async (req, res) => {
       subject: "Your Registration OTP Code",
       htmlContent: `
         <div style="font-family:Arial,sans-serif;padding:20px;border:1px solid #eee;border-radius:8px;max-width:500px;margin:auto;">
-          <h2 style="color:#4a90e2;">Welcome to Dadi maake laddu!</h2>
+          <h2 style="color:#4a90e2;">Welcome to  dadi maake laddu!</h2>
           <p>Your One-Time Password (OTP) for registration is:</p>
           <h1 style="color:#4a90e2;letter-spacing:6px;">${otp}</h1>
           <p>This OTP will expire in <b>5 minutes</b>.</p>
@@ -67,49 +67,15 @@ export const verifyOTPAndRegister = async (req, res) => {
   try {
     const { name, email, password, phone, otp } = req.body;
 
-    // 0️⃣ Required Fields Check
-    if (!name || !email || !password || !phone || !otp) {
-      return res.status(400).json({
-        success: false,
-        message: "All fields are required",
-      });
-    }
+    // 1️⃣ Validate OTP existence
+    if (!otpStore[email])
+      return res.status(400).json({ success: false, message: "OTP not found or expired" });
 
-    // 1️⃣ Validate email format
-    if (!/^\S+@\S+\.\S+$/.test(email)) {
-      return res.status(400).json({ success: false, message: "Invalid email address" });
-    }
+    // 2️⃣ Validate OTP correctness
+    if (otpStore[email] !== otp)
+      return res.status(400).json({ success: false, message: "Invalid OTP" });
 
-    // 2️⃣ Validate phone number (10 digits)
-    if (!/^[0-9]{10}$/.test(phone)) {
-      return res.status(400).json({ success: false, message: "Invalid phone number" });
-    }
-
-    // 3️⃣ Validate password length
-    if (password.length < 4) {
-      return res.status(400).json({
-        success: false,
-        message: "Password must be at least 4 characters",
-      });
-    }
-
-    // 4️⃣ Validate OTP existence
-    if (!otpStore[email]) {
-      return res.status(400).json({
-        success: false,
-        message: "OTP not found or expired",
-      });
-    }
-
-    // 5️⃣ Validate OTP correctness
-    if (otpStore[email] !== otp) {
-      return res.status(400).json({
-        success: false,
-        message: "Invalid OTP",
-      });
-    }
-
-    // 6️⃣ Check for existing user
+    // 3️⃣ Check if user already exists
     const existingUser = await UserModel.findOne({ email });
     if (existingUser) {
       return res.status(400).json({
@@ -118,10 +84,10 @@ export const verifyOTPAndRegister = async (req, res) => {
       });
     }
 
-    // 7️⃣ Hash Password
+    // 4️⃣ Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // 8️⃣ Create User
+    // 5️⃣ Create user
     const user = await UserModel.create({
       name,
       email,
@@ -131,12 +97,13 @@ export const verifyOTPAndRegister = async (req, res) => {
       emailVerified: true,
     });
 
-    // 9️⃣ Generate JWT Token
+    // 6️⃣ Generate JWT token
     const token = generateToken(user._id);
 
-    // 🔟 Remove OTP after success
+    // 7️⃣ Cleanup OTP
     delete otpStore[email];
 
+    // 8️⃣ Send success response
     return res.status(201).json({
       success: true,
       message: "Registration successful!",
@@ -145,12 +112,12 @@ export const verifyOTPAndRegister = async (req, res) => {
         _id: user._id,
         name: user.name,
         email: user.email,
-        phone: user.phone,
         role: user.role,
+        phone: user.phone,
       },
     });
   } catch (error) {
-    console.error("❌ Error verifying OTP:", error);
+    console.error("❌ Error verifying OTP and registering:", error);
     return res.status(500).json({
       success: false,
       message: "Failed to register user.",
@@ -158,7 +125,6 @@ export const verifyOTPAndRegister = async (req, res) => {
     });
   }
 };
-
 
 
 // ================================
