@@ -39,47 +39,8 @@ export const createProduct = async (req, res) => {
     console.log("Request Body:", req.body);
 
     // Required field validation
-    if (!name || !category || price === undefined || !description || !shortdescription) {
+    if (!name || !category || !price || !description || !shortdescription) {
       return res.status(400).json({ message: "Missing required fields." });
-    }
-
-    // Helper: safe number parsing + rounding
-    const toNumber = (v, fallback = 0) => {
-      if (v === undefined || v === null || v === "") return fallback;
-      const n = Number(v);
-      return Number.isFinite(n) ? n : fallback;
-    };
-
-    const round = (value, decimals = 2) => {
-      const n = toNumber(value, 0);
-      const factor = Math.pow(10, decimals);
-      return Math.round(n * factor) / factor;
-    };
-
-    // Parse & round numeric fields
-    const parsedPrice = round(price, 2); // price to 2 decimals
-    const parsedDiscount = round(discount, 2); // discount to 2 decimals
-    const parsedWeight = round(weight, 2); // weight (e.g., grams) to 2 decimals
-    const parsedPriority = Math.round(toNumber(priorityNumber, 0)); // integer
-    const parsedAvailableQty = Math.round(toNumber(availabeQuantity, 0)); // integer
-
-    // Parse JSON fields safely
-    const parsedIngredients = ingredients ? JSON.parse(ingredients) : [];
-    const parsedNutritional =
-      nutritionalInfo && typeof nutritionalInfo === "string"
-        ? JSON.parse(nutritionalInfo)
-        : nutritionalInfo || { per: "100g", values: [] };
-
-    // Round nutritional values if present and numeric
-    if (parsedNutritional && Array.isArray(parsedNutritional.values)) {
-      parsedNutritional.values = parsedNutritional.values.map((item) => {
-        // item could be { label: 'Protein', value: '3.45' } or similar
-        if (item && Object.prototype.hasOwnProperty.call(item, "value")) {
-          const roundedValue = round(item.value, 2);
-          return { ...item, value: roundedValue };
-        }
-        return item;
-      });
     }
 
     // Get Category Data
@@ -112,7 +73,7 @@ export const createProduct = async (req, res) => {
       imageUrls = uploads.map((u) => u.secure_url);
     }
 
-    // ✅ Create product with rounded numeric values
+    // ✅ Create product with subCategorySlug included
     const product = new Product({
       name,
       slug,
@@ -120,21 +81,21 @@ export const createProduct = async (req, res) => {
       category,
       subCategory,
       subCategorySlug, // ✅ Save slug in product document
-      price: parsedPrice,
+      price,
       description,
       shortdescription,
-      ingredients: parsedIngredients,
+      ingredients: ingredients ? JSON.parse(ingredients) : [],
       shelfLife,
       storageInstructions,
       isVegetarian: isVegetarian !== undefined ? isVegetarian : true,
       allergenInfo,
-      nutritionalInfo: parsedNutritional,
-      weight: parsedWeight,
-      priorityNumber: parsedPriority,
-      discount: parsedDiscount,
+      nutritionalInfo: nutritionalInfo ? JSON.parse(nutritionalInfo) : { per: "100g", values: [] },
+      weight,
+      priorityNumber: priorityNumber || 0,
+      discount: discount || 0,
       images: imageUrls,
       availabilityStatus: availabilityStatus || "In Stock",
-      availabeQuantity: parsedAvailableQty,
+      availabeQuantity: availabeQuantity || 0,
       technicalDetails: technicalDetails ? JSON.parse(technicalDetails) : {},
       faq: faq ? JSON.parse(faq) : [],
       brand,
@@ -153,7 +114,6 @@ export const createProduct = async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 };
-
 
 
 // ================================
@@ -260,24 +220,10 @@ export const updateProduct = async (req, res) => {
     if (!product) return res.status(404).json({ message: "Product not found" });
 
     const parseJSON = (data) => {
-      if (data === undefined || data === null) return undefined;
-      try { return typeof data === "string" ? JSON.parse(data) : data; } catch { return data; }
+      if (!data) return undefined;
+      try { return JSON.parse(data); } catch { return data; }
     };
 
-    // Helpers for numeric parsing + rounding
-    const toNumber = (v, fallback = undefined) => {
-      if (v === undefined || v === null || v === "") return fallback;
-      const n = Number(v);
-      return Number.isFinite(n) ? n : fallback;
-    };
-    const round = (value, decimals = 2, fallback = undefined) => {
-      const n = toNumber(value, fallback);
-      if (n === undefined) return undefined;
-      const factor = Math.pow(10, decimals);
-      return Math.round(n * factor) / factor;
-    };
-
-    // Images removal
     const imagesToRemove = parseJSON(req.body.imagesToRemove) || [];
     const imageSequence = parseJSON(req.body.imageSequence) || [];
 
@@ -290,95 +236,50 @@ export const updateProduct = async (req, res) => {
         await cloudinary.uploader.destroy(publicId);
       } catch (err) { console.error("Cloudinary delete error:", err); }
     }
-    updatedImages = updatedImages.filter((url) => !imagesToRemove.includes(url));
+    updatedImages = updatedImages.filter(url => !imagesToRemove.includes(url));
 
-    // Upload new images if any
     let newImageUrls = [];
     if (req.files?.length > 0) {
       const uploads = await Promise.all(
-        req.files.map((file) => cloudinary.uploader.upload(file.path, { folder: "products" }))
+        req.files.map(file => cloudinary.uploader.upload(file.path, { folder: "products" }))
       );
-      newImageUrls = uploads.map((u) => u.secure_url);
+      newImageUrls = uploads.map(u => u.secure_url);
     }
     updatedImages = [...updatedImages, ...newImageUrls];
 
-    // Reorder images if sequence provided
     if (imageSequence.length > 0) {
-      const validSequence = imageSequence.filter((url) => updatedImages.includes(url));
-      const missing = updatedImages.filter((url) => !validSequence.includes(url));
+      const validSequence = imageSequence.filter(url => updatedImages.includes(url));
+      const missing = updatedImages.filter(url => !validSequence.includes(url));
       updatedImages = [...validSequence, ...missing];
     }
 
-    // Handle subCategorySlug if subCategory changed
-    let subCategorySlug = product.subCategorySlug;
-    if (req.body.subCategory && String(req.body.subCategory) !== String(product.subCategory)) {
-      try {
-        const subCat = await SubCategory.findById(req.body.subCategory);
-        if (!subCat) return res.status(404).json({ message: "Subcategory not found" });
-        subCategorySlug = subCat.slug;
-      } catch (err) {
-        console.error("Subcategory lookup error:", err);
-        return res.status(500).json({ message: "Error fetching subcategory" });
-      }
-    }
-
-    // Parse JSON fields
-    const parsedIngredients = parseJSON(req.body.ingredients) ?? product.ingredients;
-    const parsedTechnical = parseJSON(req.body.technicalDetails) ?? product.technicalDetails;
-    const parsedFaq = parseJSON(req.body.faq) ?? product.faq;
-    const parsedTags = parseJSON(req.body.tags) ?? product.tags;
-
-    // Nutritional info: parse if provided, else use existing
-    let parsedNutritional =
-      parseJSON(req.body.nutritionalInfo) ?? product.nutritionalInfo ?? { per: "100g", values: [] };
-
-    // Ensure nutritional structure and round numeric values
-    if (!parsedNutritional.per) parsedNutritional.per = parsedNutritional.per || "100g";
-    if (Array.isArray(parsedNutritional.values)) {
-      parsedNutritional.values = parsedNutritional.values.map((item) => {
-        if (item && Object.prototype.hasOwnProperty.call(item, "value")) {
-          // round numeric value if possible, else keep as-is
-          const rounded = round(item.value, 2, item.value);
-          return { ...item, value: rounded !== undefined ? rounded : item.value };
-        }
-        return item;
-      });
-    }
-
-    // Numeric fields: if provided (even 0), use parsed+rounded; otherwise keep existing
-    const parsedPrice = req.body.price !== undefined ? round(req.body.price, 2, product.price) : product.price;
-    const parsedDiscount = req.body.discount !== undefined ? round(req.body.discount, 2, product.discount) : product.discount;
-    const parsedWeight = req.body.weight !== undefined ? round(req.body.weight, 2, product.weight) : product.weight;
-    const parsedPriority = req.body.priorityNumber !== undefined ? Math.round(toNumber(req.body.priorityNumber, product.priorityNumber ?? 0)) : product.priorityNumber;
-    const parsedAvailableQty = req.body.availabeQuantity !== undefined ? Math.round(toNumber(req.body.availabeQuantity, product.availabeQuantity ?? 0)) : product.availabeQuantity;
-
-    // Build update object (preserve values if field not provided)
     const fieldsToUpdate = {
-      name: req.body.name !== undefined ? req.body.name : product.name,
+      name: req.body.name || product.name,
       slug: req.body.name ? slugify(req.body.name, { lower: true }) : product.slug,
-      category: req.body.category !== undefined ? req.body.category : product.category,
-      subCategory: req.body.subCategory !== undefined ? req.body.subCategory : product.subCategory,
-      subCategorySlug,
-      price: parsedPrice,
-      description: req.body.description !== undefined ? req.body.description : product.description,
-      shortdescription: req.body.shortdescription !== undefined ? req.body.shortdescription : product.shortdescription,
-      ingredients: parsedIngredients,
-      shelfLife: req.body.shelfLife !== undefined ? req.body.shelfLife : product.shelfLife,
-      storageInstructions: req.body.storageInstructions !== undefined ? req.body.storageInstructions : product.storageInstructions,
+      category: req.body.category || product.category,
+      subCategory: req.body.subCategory || product.subCategory,
+      price: req.body.price || product.price,
+      description: req.body.description || product.description,
+      shortdescription: req.body.shortdescription || product.shortdescription,
+      ingredients: parseJSON(req.body.ingredients) || product.ingredients,
+      shelfLife: req.body.shelfLife || product.shelfLife,
+      storageInstructions: req.body.storageInstructions || product.storageInstructions,
       isVegetarian: req.body.isVegetarian !== undefined ? req.body.isVegetarian : product.isVegetarian,
-      allergenInfo: req.body.allergenInfo !== undefined ? req.body.allergenInfo : product.allergenInfo,
-      nutritionalInfo: parsedNutritional,
-      weight: parsedWeight,
-      priorityNumber: parsedPriority,
-      discount: parsedDiscount,
+      allergenInfo: req.body.allergenInfo || product.allergenInfo,
+      nutritionalInfo: parseJSON(req.body.nutritionalInfo) || product.nutritionalInfo,
+      weight: req.body.weight || product.weight,
+
+          
+      priorityNumber: req.body.priorityNumber !== undefined ? req.body.priorityNumber : product.priorityNumber,
+      discount: req.body.discount !== undefined ? req.body.discount : product.discount,
       images: updatedImages,
-      availabilityStatus: req.body.availabilityStatus !== undefined ? req.body.availabilityStatus : product.availabilityStatus,
-      availabeQuantity: parsedAvailableQty,
-      technicalDetails: parsedTechnical,
-      faq: parsedFaq,
-      brand: req.body.brand !== undefined ? req.body.brand : product.brand,
-      manufacturer: req.body.manufacturer !== undefined ? req.body.manufacturer : product.manufacturer,
-      tags: parsedTags,
+      availabilityStatus: req.body.availabilityStatus || product.availabilityStatus,
+      availabeQuantity: req.body.availabeQuantity || product.availabeQuantity,
+      technicalDetails: parseJSON(req.body.technicalDetails) || product.technicalDetails,
+      faq: parseJSON(req.body.faq) || product.faq,
+      brand: req.body.brand || product.brand,
+      manufacturer: req.body.manufacturer || product.manufacturer,
+      tags: parseJSON(req.body.tags) || product.tags,
       isActive: req.body.isActive !== undefined ? req.body.isActive : product.isActive,
     };
 
@@ -393,7 +294,6 @@ export const updateProduct = async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 };
-
 // ================================
 // DELETE PRODUCT
 // ================================
